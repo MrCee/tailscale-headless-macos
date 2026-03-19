@@ -15,37 +15,56 @@
 
 ---
 
-## What this is
+## 🧠 What this is
 
-A headless Tailscale setup for macOS.
+A simple, reliable way to set up Tailscale on macOS without needing the GUI app.
 
-This project runs:
+This project:
 
-- `tailscaled` via Homebrew  
-- supervised by a system LaunchDaemon  
-- with explicit MagicDNS resolver wiring under `/etc/resolver`  
+- installs and runs `tailscaled` via Homebrew  
+- manages it with a system LaunchDaemon  
+- configures MagicDNS explicitly  
 
-No GUI. No menu bar. No login session required.
+It’s designed for machines that you want online and reachable — without needing to log in or manage an app.
 
-> macOS runs as a Tailscale node — reachable before login, with reliable DNS.
-
----
-
-## Features
-
-- Headless `tailscaled`
-- LaunchDaemon supervision at boot
-- Explicit MagicDNS resolver wiring
-- Automatic stale resolver cleanup
-- zsh-safe scripting
-- install / verify / repair / uninstall workflows
-- hostname auto-detection (`TS_HOSTNAME`)
-- warning on hostname mismatch
-- fallback daemon start if LaunchDaemon bootstrap fails
+> Set it up once — the machine stays connected, even before login.
 
 ---
 
-## Architecture
+## 🎯 When this makes sense
+
+This is **not** for everyone.
+
+Use it if you want:
+
+- a Mac that stays connected even when nobody is logged in  
+- remote access to machines like iMacs, minis, or lab devices  
+- predictable DNS behaviour (no mystery breakage)  
+- to avoid the macOS Tailscale GUI entirely  
+
+If you’re happy using the official app — you probably don’t need this.
+
+---
+
+## ✨ Features
+
+- Fully headless `tailscaled`
+- Starts at boot via LaunchDaemon
+- Explicit MagicDNS resolver setup
+- Cleans up stale DNS configs automatically
+- Safe for zsh environments
+- Structured workflows:
+  - install
+  - verify
+  - repair
+  - uninstall
+- Smart hostname detection
+- Warning if hostname doesn’t match expectation
+- Fallback startup if LaunchDaemon fails
+
+---
+
+## 🧱 How it fits together
 
 ```text
 Homebrew
@@ -56,18 +75,18 @@ LaunchDaemon
    ↓
 /etc/resolver/*
    ↓
-macOS DNS stack
+macOS DNS
    ↓
-MagicDNS resolution
+MagicDNS
 ```
 
 ---
 
-## Required configuration
+## ⚙️ Required configuration
 
 ### `TAILNET_DOMAIN`
 
-Your tailnet domain is required.
+You **must** set your tailnet domain.
 
 Example:
 
@@ -75,53 +94,53 @@ Example:
 example-tailnet.ts.net
 ```
 
-Find it via:
+Find it with:
 
 ```bash
 tailscale dns status --all
 ```
 
-or:
+or via:
 
 - Tailscale Admin Console → DNS
 
-Do not guess this value.
+> Do not guess this — it must be exact.
 
 ---
 
-## Hostname behaviour
+## 🖥️ Hostname behaviour
 
-`TS_HOSTNAME` controls:
+Controls:
 
 ```bash
 tailscale up --hostname=...
 ```
 
-If unset, it is auto-detected from macOS:
+If not set, it’s auto-detected from:
 
 1. `LocalHostName`
 2. `ComputerName`
 3. `hostname -s`
 
-If set but different, a warning is shown and the configured value is used.
+If you override it and it differs — you’ll get a warning.
 
-Recommended:
+**Best practice:**
 
-- keep it aligned with the Mac hostname  
-- override only intentionally  
-
----
-
-## Requirements
-
-- Tailscale account
-- existing tailnet
-- tailnet domain (MagicDNS suffix)
-- MagicDNS enabled (recommended)
+- keep it aligned with your Mac name  
+- only override when you actually mean to  
 
 ---
 
-## Quick start
+## 📋 Requirements
+
+- Tailscale account  
+- existing tailnet  
+- tailnet domain  
+- MagicDNS enabled (recommended)  
+
+---
+
+## 🚀 Quick start
 
 ### 1. Clone
 
@@ -136,7 +155,7 @@ cd tailscale-headless-macos
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit:
 
 ```dotenv
 TAILNET_DOMAIN=your-tailnet.ts.net
@@ -148,9 +167,7 @@ Optional:
 TS_HOSTNAME=your-mac-name
 ```
 
-- `TAILNET_DOMAIN` must match your real tailnet  
-- If set, replace `TS_HOSTNAME` with your actual hostname  
-- If unset, `TS_HOSTNAME` will be auto-detected  
+---
 
 ### 3. Install
 
@@ -160,11 +177,13 @@ TS_HOSTNAME=your-mac-name
 
 This will:
 
-- install or relink Tailscale
-- install LaunchDaemon
-- start `tailscaled`
-- configure `/etc/resolver`
-- optionally run `tailscale up`
+- install or relink Tailscale  
+- install LaunchDaemon  
+- start `tailscaled`  
+- configure DNS resolvers  
+- optionally authenticate the node  
+
+---
 
 ### 4. Verify
 
@@ -172,11 +191,15 @@ This will:
 ./verify.sh
 ```
 
+---
+
 ### 5. Repair DNS (if needed)
 
 ```bash
 ./fix-magicdns.sh
 ```
+
+---
 
 ### 6. Uninstall
 
@@ -186,22 +209,22 @@ This will:
 
 ---
 
-## Script overview
+## 🔍 Script overview
 
 ### `install.sh`
 
-Main provisioning entrypoint:
+Main setup flow:
 
-- ensures sudo session
-- installs or relinks Tailscale
-- prepares state + logs
-- installs LaunchDaemon
-- starts daemon
-- writes resolver files
-- flushes DNS
-- optionally runs `tailscale up`
+- ensures sudo session  
+- installs or relinks Tailscale  
+- prepares state + logs  
+- installs LaunchDaemon  
+- starts daemon  
+- writes resolver files  
+- flushes DNS  
+- optionally runs `tailscale up`  
 
-Falls back to manual daemon start if required.
+Includes fallback if LaunchDaemon bootstrap fails.
 
 ---
 
@@ -209,38 +232,38 @@ Falls back to manual daemon start if required.
 
 Read-only diagnostics:
 
-- binary presence
-- daemon state
-- LaunchDaemon status
-- socket presence
-- resolver files
-- DNS resolution
-- logs
+- binary check  
+- daemon state  
+- LaunchDaemon status  
+- socket presence  
+- resolver files  
+- DNS resolution  
+- logs  
 
-Shows partial vs healthy states.
+Helps identify partial vs healthy setups.
 
 ---
 
 ### `fix-magicdns.sh`
 
-Repairs DNS only:
+DNS repair only:
 
-- ensures `/etc/resolver`
-- removes stale `*.ts.net`
-- rewrites managed resolvers
-- flushes DNS cache
+- ensures `/etc/resolver` exists  
+- removes stale `*.ts.net` files  
+- rewrites managed resolvers  
+- flushes DNS  
 
 ---
 
 ### `uninstall.sh`
 
-Removes system state:
+Clean removal:
 
-- stops daemon
-- removes LaunchDaemon
-- clears state + logs
-- removes resolver files
-- flushes DNS
+- stops daemon  
+- removes LaunchDaemon  
+- clears state + logs  
+- removes resolver files  
+- flushes DNS  
 
 Optional:
 
@@ -250,9 +273,9 @@ REMOVE_BREW_PACKAGE=true
 
 ---
 
-## MagicDNS model
+## 🌐 MagicDNS model
 
-Resolver files are explicitly managed:
+Resolvers are explicitly managed:
 
 ```text
 /etc/resolver/ts.net
@@ -260,9 +283,9 @@ Resolver files are explicitly managed:
 /etc/resolver/search.tailscale
 ```
 
-This avoids DNS issues commonly seen on headless macOS setups.
+This avoids common macOS DNS edge cases in headless setups.
 
-Stale resolvers are automatically cleaned:
+Old resolver files are automatically cleaned:
 
 ```text
 /etc/resolver/*.ts.net
@@ -270,41 +293,43 @@ Stale resolvers are automatically cleaned:
 
 ---
 
-## Known behaviour
+## ⚠️ Known behaviour
 
-### DNS convergence delay
+### DNS may take a moment
 
-Immediately after install or authentication:
+Right after install or login:
 
 ```bash
 tailscale status
 ```
 
-may briefly show stale data.
-
-Wait a few seconds and retry.
+You may briefly see stale data — give it a few seconds.
 
 ---
 
-## Typical workflows
+## 🧪 Typical workflows
 
-### Fresh install
+### Fresh setup
 
 ```bash
 cp .env.example .env
-# edit .env and set TAILNET_DOMAIN
+# edit .env
 ./install.sh
 ./verify.sh
 ```
 
-### DNS repair
+---
+
+### Fix DNS issues
 
 ```bash
 ./fix-magicdns.sh
 ./verify.sh
 ```
 
-### Full removal
+---
+
+### Remove everything
 
 ```bash
 ./uninstall.sh
@@ -312,32 +337,32 @@ cp .env.example .env
 
 ---
 
-## Design principles
+## 🧩 Design approach
 
-- explicit over implicit
-- system-level over user session
-- explicit DNS wiring
-- fail-fast where appropriate
-- clear separation: install, verify, repair, uninstall
-
----
-
-## Tested target
-
-- macOS Intel
-- macOS Apple Silicon
-- Homebrew-based installs
+- keep everything explicit  
+- run at system level, not user level  
+- avoid hidden macOS behaviour  
+- separate install / verify / repair clearly  
+- make failures visible and fixable  
 
 ---
 
-## Author
+## 🖥️ Tested on
+
+- macOS Intel  
+- macOS Apple Silicon  
+- Homebrew installs  
+
+---
+
+## 👤 Author
 
 MrCee
 
 ---
 
-## Summary
+## 💡 Summary
 
-> macOS as a headless, always-on Tailscale node
+> Turn a Mac into a quiet, always-available Tailscale node.
 
-No GUI. No guesswork. Always on.
+No GUI. No surprises. Just works.
