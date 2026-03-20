@@ -7,6 +7,7 @@ If `launchctl bootstrap` fails with an I/O error, the installer falls back to a 
 ## Hostname gets `-1` suffix
 
 That usually means stale local state collided with an existing node record.
+Delete the exisiting record node(s) from the web UI and run again.
 
 ## `tailscale ping` works, app lookup fails
 
