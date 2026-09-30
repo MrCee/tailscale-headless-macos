@@ -1,0 +1,21 @@
+name: Shell and updater checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts
+        run: |
+          for script in install.sh uninstall.sh verify.sh fix-magicdns.sh scripts/install-headless.sh scripts/install-auto-updates.sh scripts/remove-auto-updates.sh; do
+            /bin/zsh -n "$script"
+          done
+          /bin/bash -n scripts/update-tailscale.sh
+      - name: Exercise updater failure and recovery paths
+        run: python3 tests/test-updater.py
+      - name: Check integrated installation flow
+        run: python3 tests/test-install.py

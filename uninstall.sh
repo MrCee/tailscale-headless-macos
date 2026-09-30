@@ -71,6 +71,13 @@ echo "TAILNET_DOMAIN      : ${TAILNET_DOMAIN:-<unset>}"
 echo "============================================================"
 echo
 
+# Stop automatic updates before touching the daemon or its state. The helper
+# refuses to interrupt an update in progress, so this uninstall stops there too.
+if [[ -f /Library/LaunchDaemons/com.tailscale.headless-updater.plist ]] || \
+   launchctl print system/com.tailscale.headless-updater >/dev/null 2>&1; then
+  "${ROOT_DIR}/scripts/remove-auto-updates.sh"
+fi
+
 echo "---- disconnect if available ----"
 if [[ -x "${TS}" ]]; then
   sudo "${TS}" down 2>/dev/null || true
