@@ -42,14 +42,17 @@ if name == "launchctl":
         if loaded:
             print("state = running")
         sys.exit(0 if loaded else 113)
-elif name == "brew" and args == ["--prefix"]:
-    print(root / "homebrew")
+elif name == "uname":
+    print("Darwin" if args == ["-s"] else os.environ.get("TEST_ARCH", "x86_64"))
     sys.exit(0)
-elif name == "uname" and args == ["-s"]:
-    print("Darwin")
+elif name == "sysctl":
+    print(os.environ.get("TEST_ARM64", "0"))
+    sys.exit(0)
+elif name == "PlistBuddy":
+    print(root / "PrivilegedHelperTools/com.tailscale.headless/current/tailscaled")
     sys.exit(0)
 elif name == "id":
-    print("501" if "-u" in args else "brewowner")
+    print("501" if "-u" in args else "builduser")
     sys.exit(0)
 elif name == "pgrep" and args == ["-x", "tailscaled"]:
     sys.exit(0 if os.environ.get("TEST_UNMANAGED_DAEMON") == "1" else 1)
@@ -70,7 +73,7 @@ class InstallTests(unittest.TestCase):
         self.checkout.mkdir()
         self.stubs = self.root / "stubs"
         self.stubs.mkdir()
-        self.prefix = self.root / "homebrew"
+        self.prefix = self.root / "managed"
         (self.prefix / "bin").mkdir(parents=True)
         self.launchdaemons = self.root / "LaunchDaemons"
         self.launchdaemons.mkdir()
@@ -78,12 +81,11 @@ class InstallTests(unittest.TestCase):
         self.dispatch = self.root / "dispatch.py"
         self.dispatch.write_text(DISPATCH)
         wrapper = '#!/bin/sh\nexec "$TEST_PYTHON" "$TEST_DISPATCH" "${0##*/}" "$@"\n'
-        for name in ("sudo", "launchctl", "brew", "uname", "id", "pgrep", "curl", "plutil",
+        for name in ("sudo", "launchctl", "sysctl", "uname", "id", "pgrep", "curl", "plutil",
                      "PlistBuddy", "pkill", "killall", "chown", "chmod", "install"):
             target = self.stubs / name
             target.write_text(wrapper)
             target.chmod(0o755)
-        (self.prefix / "bin/brew").symlink_to(self.stubs / "brew")
         scripts = self.checkout / "scripts"
         scripts.mkdir()
         for name in ("install-headless.sh", "install-auto-updates.sh", "remove-auto-updates.sh"):
@@ -97,11 +99,12 @@ class InstallTests(unittest.TestCase):
             "/usr/bin/sudo": self.stubs / "sudo", "/bin/launchctl": self.stubs / "launchctl",
             "/usr/bin/uname": self.stubs / "uname", "/usr/bin/id": self.stubs / "id",
             "/usr/bin/pgrep": self.stubs / "pgrep",
+            "/usr/sbin/sysctl": self.stubs / "sysctl",
             "/usr/bin/curl": self.stubs / "curl", "/usr/bin/plutil": self.stubs / "plutil",
             "/usr/libexec/PlistBuddy": self.stubs / "PlistBuddy",
             "/Library/LaunchDaemons": self.launchdaemons,
             "/Library/PrivilegedHelperTools": self.root / "PrivilegedHelperTools",
-            "/usr/local": self.prefix, "/opt/homebrew": self.root / "arm-homebrew",
+            "/usr/local": self.prefix,
             "/var/run": self.root / "run",
         }
         for original, replacement in endpoints.items():
@@ -114,7 +117,6 @@ class InstallTests(unittest.TestCase):
         self.entrypoint.chmod(0o755)
         self.defaults = {
             "TAILNET_DOMAIN": "test-tailnet.ts.net",
-            "BREW_BIN": str(self.prefix / "bin/brew"),
             "LAUNCHD_LABEL": "com.example.tailscaled",
             "LAUNCHD_PLIST": str(self.launchdaemons / "com.example.tailscaled.plist"),
             "TAILSCALED_SOCKET": str(self.root / "run/tailscaled.socket"),
@@ -147,6 +149,23 @@ class InstallTests(unittest.TestCase):
         forbidden = [item for item in self.events() if item["component"].startswith("FORBIDDEN:")]
         self.assertEqual(forbidden, [], result.stdout + result.stderr)
         return result
+
+    def test_apple_silicon_install_calls_base_and_updates(self):
+        self.run_install(TEST_ARCH="arm64", TEST_ARM64="1")
+        self.assertEqual([item["component"] for item in self.events()], ["base", "updates"])
+
+    def test_rosetta_install_calls_base_and_updates(self):
+        self.run_install(TEST_ARCH="x86_64", TEST_ARM64="1")
+        self.assertEqual([item["component"] for item in self.events()], ["base", "updates"])
+
+    def test_unsupported_architecture_fails_before_helpers(self):
+        self.run_install(success=False, TEST_ARCH="ppc")
+        self.assertEqual(self.events(), [])
+
+    def test_launchagent_path_is_refused_before_helpers(self):
+        self.write_config(LAUNCHD_PLIST=str(self.root / "Library/LaunchAgents/com.example.tailscaled.plist"))
+        self.run_install(success=False)
+        self.assertEqual(self.events(), [])
 
     def test_new_install_enables_updates_by_default(self):
         self.run_install()

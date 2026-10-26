@@ -33,19 +33,13 @@ fi
 
 source "${ENV_FILE}"
 
-: "${TS_HOSTNAME:?TS_HOSTNAME is required}"
+TS_HOSTNAME=${TS_HOSTNAME:-$(scutil --get LocalHostName)}
 : "${TAILNET_DOMAIN:?TAILNET_DOMAIN is required}"
 : "${LAUNCHD_LABEL:?LAUNCHD_LABEL is required}"
 
-BREW_BIN="${BREW_BIN:-brew}"
-if ! command -v "${BREW_BIN}" >/dev/null 2>&1; then
-  echo "ERROR: brew not found via BREW_BIN=${BREW_BIN}"
-  exit 1
-fi
-
-BREW_PREFIX="$("${BREW_BIN}" --prefix)"
-TS="${BREW_PREFIX}/bin/tailscale"
-TSD="${BREW_PREFIX}/bin/tailscaled"
+BINARY_ROOT=/Library/PrivilegedHelperTools/com.tailscale.headless
+TS="$BINARY_ROOT/current/tailscale"
+TSD="$BINARY_ROOT/current/tailscaled"
 
 TAILSCALED_SOCKET="${TAILSCALED_SOCKET:-/var/run/tailscaled.socket}"
 
@@ -58,8 +52,7 @@ echo "TAILSCALE HEADLESS MACOS VERIFY"
 echo "============================================================"
 date
 echo "ROOT_DIR            : ${ROOT_DIR}"
-echo "BREW_BIN            : ${BREW_BIN}"
-echo "BREW_PREFIX         : ${BREW_PREFIX}"
+echo "BINARY_ROOT         : ${BINARY_ROOT}"
 echo "TS                  : ${TS}"
 echo "TSD                 : ${TSD}"
 echo "TS_HOSTNAME         : ${TS_HOSTNAME}"
@@ -79,10 +72,10 @@ sudo launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | sed -n '1,40p' || t
 echo
 
 echo "---- tailscale ----"
-"${TS}" status || true
-"${TS}" ip -4 || true
+"${TS}" --socket="${TAILSCALED_SOCKET}" status || true
+"${TS}" --socket="${TAILSCALED_SOCKET}" ip -4 || true
 echo
-"${TS}" dns status --all || true
+"${TS}" --socket="${TAILSCALED_SOCKET}" dns status --all || true
 echo
 
 echo "---- socket ----"

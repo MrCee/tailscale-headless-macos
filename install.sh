@@ -22,15 +22,19 @@ case "${1:-}" in
   --help|-h) usage; exit 0 ;;
   *) usage >&2; exit 1 ;;
 esac
-[[ $EUID != 0 ]] || fail 'Run ./install.sh as your normal Homebrew user, without sudo. Administrator authentication is requested when needed.'
-[[ $(/usr/bin/uname -s) == Darwin ]] || fail 'This installer requires macOS.'
+[[ $EUID != 0 ]] || fail 'Run ./install.sh as your normal user, without sudo. Administrator authentication is requested when needed.'
+[[ $(/usr/bin/uname -s) == Darwin ]] || { echo 'macOS is required' >&2; exit 1; }
+case "$(/usr/bin/uname -m)" in
+  x86_64|arm64) ;;
+  *) echo 'Intel or Apple Silicon macOS is required' >&2; exit 1 ;;
+esac
 
 # This file is local user configuration; it is never sourced by a root job.
 if [[ -f "$ENV_FILE" ]]; then source "$ENV_FILE"; fi
 AUTO_UPDATE=${AUTO_UPDATE:-true}
 AUTO_UPDATE_HOUR=${AUTO_UPDATE_HOUR:-4}
 AUTO_UPDATE_MINUTE=${AUTO_UPDATE_MINUTE:-15}
-BREW_BIN=${BREW_BIN:-brew}
+readonly BINARY_ROOT=/Library/PrivilegedHelperTools/com.tailscale.headless
 LAUNCHD_LABEL=${LAUNCHD_LABEL:-com.tailscale.tailscaled}
 LAUNCHD_PLIST=${LAUNCHD_PLIST:-/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist}
 TAILSCALED_SOCKET=${TAILSCALED_SOCKET:-/var/run/tailscaled.socket}
@@ -44,20 +48,18 @@ esac
 [[ "$LAUNCHD_LABEL" == [A-Za-z0-9]* && "$LAUNCHD_LABEL" != *[^A-Za-z0-9._-]* ]] || fail 'Invalid LAUNCHD_LABEL.'
 [[ "$LAUNCHD_PLIST" == "/Library/LaunchDaemons/$LAUNCHD_LABEL.plist" ]] || fail 'LAUNCHD_PLIST must match the configured service label in /Library/LaunchDaemons.'
 [[ "$TAILSCALED_SOCKET" == /* && "$TAILSCALED_SOCKET" != *$'\n'* ]] || fail 'TAILSCALED_SOCKET must be an absolute path.'
-BREW_BIN=$(command -v "$BREW_BIN") || fail 'Homebrew is required. Install it from https://brew.sh, then rerun ./install.sh.'
-[[ "$BREW_BIN" == /* && -x "$BREW_BIN" ]] || fail 'BREW_BIN must resolve to an executable absolute path.'
-BREW_PREFIX=$("$BREW_BIN" --prefix)
-[[ "$BREW_PREFIX" == /usr/local || "$BREW_PREFIX" == /opt/homebrew ]] || fail 'Only standard Intel and Apple Silicon Homebrew prefixes are supported.'
 
 readonly UPDATE_INSTALLER="$ROOT_DIR/scripts/install-auto-updates.sh"
 readonly UPDATE_REMOVER="$ROOT_DIR/scripts/remove-auto-updates.sh"
 readonly BASE_INSTALLER="$ROOT_DIR/scripts/install-headless.sh"
 [[ -x "$UPDATE_INSTALLER" && -x "$UPDATE_REMOVER" && -x "$BASE_INSTALLER" ]] || fail 'The download is incomplete: required installation helpers are missing.'
-update_args=(--brew "$BREW_BIN" --label "$LAUNCHD_LABEL" --socket "$TAILSCALED_SOCKET" --hour "$AUTO_UPDATE_HOUR" --minute "$AUTO_UPDATE_MINUTE")
+update_args=(--label "$LAUNCHD_LABEL" --socket "$TAILSCALED_SOCKET" --hour "$AUTO_UPDATE_HOUR" --minute "$AUTO_UPDATE_MINUTE")
 
 EXISTING=false
 if /bin/launchctl print "system/$LAUNCHD_LABEL" >/dev/null 2>&1; then
   EXISTING=true
+  daemon_path=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$LAUNCHD_PLIST")
+  [[ "$daemon_path" == "$BINARY_ROOT/current/tailscaled" ]] || fail 'This service uses an older or externally managed binary. Preserve its state and resolve migration manually before using this installer.'
 else
   # A partial installation needs diagnosis before any script replaces its state
   # or kills a daemon that may belong to a different service.
@@ -94,7 +96,7 @@ fi
 
 if [[ "$EXISTING" == false ]]; then
   # Older .env files inherit the same service defaults in the base installer.
-  export BREW_BIN LAUNCHD_LABEL LAUNCHD_PLIST TAILSCALED_SOCKET
+  export LAUNCHD_LABEL LAUNCHD_PLIST TAILSCALED_SOCKET
   if ! "$BASE_INSTALLER"; then
     fail 'Daemon installation did not complete. Automatic updates were not configured.'
   fi

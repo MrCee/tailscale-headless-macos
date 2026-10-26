@@ -1,15 +1,11 @@
 # Architecture
 
-This project is built around a small deterministic stack:
+- Pinned stable Tailscale Go module, verified through the Go checksum database.
+- Direct verified Go bootstrap when no suitable native toolchain is available.
+- Native Intel or Apple Silicon `tailscale` and `tailscaled` builds using upstream `build_dist.sh`.
+- Root-owned versioned binaries with an atomic `current` selection.
+- System launchd service for startup after the disk is unlocked.
+- Explicit resolver files for MagicDNS.
+- Non-root scheduled builds, followed by privileged installation, health checks and recovery holds.
 
-- `tailscale` CLI from Homebrew
-- `tailscaled` daemon
-- `launchd` LaunchDaemon for pre-login startup
-- explicit macOS resolver files for MagicDNS
-
-Goals:
-
-- pre-login availability
-- no GUI dependency
-- deterministic system paths
-- explicit DNS repair and verification
+State and authentication remain separate from replaceable executables. Intel and Apple Silicon macOS are supported; Rosetta shells select native ARM64 builds.

@@ -1,21 +1,27 @@
 # Troubleshooting
 
-## Bootstrap failed: 5
+## Build or Go bootstrap failed
 
-If `launchctl bootstrap` fails with an I/O error, the installer falls back to a manual daemon start for the current session.
+Check network access, disk space, the release's minimum macOS/Go requirements and the reported checksum/version error. A checksum mismatch must be investigated; do not bypass it. Build cache: `~/Library/Caches/tailscale-headless` for the installation user.
 
-## Hostname gets `-1` suffix
+A build lock is left after an unclean termination. Confirm no builder is running before removing `build.lock` from that cache. A scheduled build runs as the account recorded in the installed updater config; that account must still exist.
 
-That usually means stale local state collided with an existing node record.
-Delete the exisiting record node(s) from the web UI and run again.
+## Bootstrap failed
 
-## `tailscale ping` works, app lookup fails
+Inspect the daemon plist with `plutil -lint`, inspect the daemon logs and read `launchctl print system/com.tailscale.tailscaled`. A bootstrap failure is reported as incomplete setup; there is no temporary manual-daemon fallback. Resolve the partial service before rerunning installation.
 
-That is usually resolver plumbing, not transport failure.
+## Existing service uses an older binary path
 
-Run:
+This installer maintains only its own Go-built binaries. Preserve the old service's plist, state, socket and authentication and plan an explicit migration. Do not start a second daemon or delete state to force setup.
 
-```bash
-./fix-magicdns.sh
-./verify.sh
-```
+## Hostname receives a suffix
+
+Inspect the local and admin-console device records before changing anything. Do not delete state or device records solely to remove a suffix; verify which identity is active first.
+
+## Tailscale transport works but app lookups fail
+
+Inspect `.env`, then run `./verify.sh`. If the resolver configuration is incorrect, use `./fix-magicdns.sh`. See [DNS notes](dns-magicdns-notes.md).
+
+## Update on hold
+
+Read the update log and [recovery guidance](automatic-updates.md#recovery-hold). Do not clear a hold or delete recovery binaries blindly.

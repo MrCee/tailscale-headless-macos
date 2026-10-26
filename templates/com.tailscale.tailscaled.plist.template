@@ -9,6 +9,7 @@
   <array>
     <string>__TAILSCALED_PATH__</string>
     <string>--state=__STATE_FILE__</string>
+    <string>--socket=__SOCKET__</string>
   </array>
 
   <key>RunAtLoad</key>

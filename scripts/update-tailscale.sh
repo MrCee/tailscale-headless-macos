@@ -40,22 +40,19 @@ binary_version() {
 
 load_config() {
   secure_path "$runtime_dir" && secure_path "$config" || die 'Runtime directory and config.plist must be root-owned and not writable by group or others.'
-  brew_bin=$(plist_value "$config" BrewBin) || die 'Missing BrewBin.'
-  brew_user=$(plist_value "$config" BrewUser) || die 'Missing BrewUser.'
-  brew_prefix=$(plist_value "$config" BrewPrefix) || die 'Missing BrewPrefix.'
+  binary_root=/Library/PrivilegedHelperTools/com.tailscale.headless
+  build_user=$(plist_value "$config" BuildUser) || die 'Missing BuildUser.'
   service_label=$(plist_value "$config" ServiceLabel) || die 'Missing ServiceLabel.'
   service_plist=$(plist_value "$config" ServicePlist) || die 'Missing ServicePlist.'
   socket=$(plist_value "$config" Socket) || die 'Missing Socket.'
-  [[ "$brew_prefix" == /usr/local || "$brew_prefix" == /opt/homebrew ]] || die 'Expected the Intel or Apple Silicon Homebrew prefix.'
-  [[ "$brew_bin" == "$brew_prefix/bin/brew" ]] || die 'BrewBin must be BrewPrefix/bin/brew.'
-  [[ "$brew_user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || die 'Invalid Homebrew user.'
-  brew_uid=$(/usr/bin/id -u "$brew_user") || die 'The configured Homebrew owner does not exist.'
-  [[ "$brew_uid" =~ ^[1-9][0-9]*$ ]] || die 'Homebrew must run as an owner with a valid non-root UID.'
+  [[ "$build_user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || die 'Invalid build user.'
+  build_uid=$(/usr/bin/id -u "$build_user") || die 'Build user does not exist.'
+  [[ "$build_uid" =~ ^[1-9][0-9]*$ ]] || die 'Build user must have a valid non-root UID.'
   [[ "$service_label" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Invalid service label.'
   [[ "$service_plist" == "/Library/LaunchDaemons/$service_label.plist" ]] || die 'Unexpected service plist location.'
   [[ "$socket" == /* && "$socket" != *$'\n'* ]] || die 'Socket must be an absolute path.'
   service="system/$service_label"
-  cli="$brew_prefix/bin/tailscale"
+  cli="$binary_root/current/tailscale"
   recovery="$runtime_dir/recovery"
   pending="$runtime_dir/TRANSACTION_PENDING"
   marker="$runtime_dir/RECOVERY_REQUIRED"
@@ -66,18 +63,17 @@ preflight() {
   secure_path "$service_plist" || die 'The service plist must be root-owned and not writable by group or others.'
   [[ $(plist_value "$service_plist" Label) == "$service_label" ]] || die 'Service label changed.'
   daemon=$(plist_value "$service_plist" ProgramArguments:0) || die 'Missing daemon executable.'
-  [[ "$daemon" == "$brew_prefix/bin/tailscaled" || "$daemon" == "$brew_prefix/opt/tailscale/bin/tailscaled" ]] || die 'Daemon executable is not a supported Homebrew path.'
+  [[ "$daemon" == "$binary_root/current/tailscaled" ]] || die 'Daemon executable is not the managed Go build.'
   [[ $(plist_value "$service_plist" RunAtLoad) == true ]] || die 'RunAtLoad is not enabled.'
   [[ $(plist_value "$service_plist" KeepAlive) == true ]] || die 'KeepAlive must be true.'
-  [[ -x "$brew_bin" ]] || die 'Homebrew executable is missing.'
-  [[ $(/usr/bin/stat -f %Su "$brew_prefix/Cellar/tailscale") == "$brew_user" ]] || die 'Homebrew owner changed.'
+  secure_path "$binary_root" && secure_path "$binary_root/releases" && secure_path "$runtime_dir/build-tailscale.sh" || die 'Binary and build helper directories must be protected.'
   /bin/launchctl print "$service" >/dev/null || die 'Tailscale is not loaded as the configured system service.'
 }
 
 candidate_pair() {
   candidate_cli=$(resolve_path "$cli") || return 1
   candidate_daemon=$(resolve_path "$daemon") || return 1
-  case "$candidate_daemon" in "$brew_prefix"/Cellar/tailscale/*/bin/tailscaled) ;; *) return 1 ;; esac
+  case "$candidate_daemon" in "$binary_root"/releases/*/tailscaled) ;; *) return 1 ;; esac
   [[ "$candidate_cli" == "${candidate_daemon%/*}/tailscale" ]] || return 1
   [[ -x "$candidate_cli" && -x "$candidate_daemon" ]] || return 1
   candidate_version=$(binary_version "$candidate_daemon") || return 1
@@ -96,7 +92,7 @@ running_image() {
   images=$(/usr/sbin/lsof -a -p "$pid" -d txt -Fn 2>/dev/null) || return 1
   while IFS= read -r image; do
     case "$image" in
-      n"$brew_prefix"/Cellar/tailscale/*/bin/tailscaled|n"$recovery"/tailscaled)
+      n"$binary_root"/releases/*/tailscaled|n"$recovery"/tailscaled)
         printf '%s\n' "${image#n}"; return 0 ;;
     esac
   done <<< "$images"
@@ -123,17 +119,51 @@ wait_healthy() {
   return 1
 }
 
-brew_as_owner() {
-  # sudo changes credentials, but does not adopt the user's bootstrap/audit
-  # context. Homebrew's macOS sandbox needs that context to reach trustd.agent
-  # for Go TLS verification. asuser does not require an Aqua login session.
-  /bin/launchctl asuser "$brew_uid" /usr/bin/sudo -n -H -u "$brew_user" /usr/bin/env \
-    PATH="$brew_prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    NONINTERACTIVE=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 \
-    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false \
-    GIT_SSH_COMMAND='/usr/bin/ssh -o BatchMode=yes' \
-    HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_CLEANUP_FORMULAE=tailscale \
-    HOMEBREW_UPDATE_TO_TAG=1 "$brew_bin" "$@" </dev/null
+build_as_user() {
+  # Execute downloaded source as the configured non-root user, with a clean
+  # environment, even when the scheduler runs before anyone logs in.
+  /bin/launchctl asuser "$build_uid" /usr/bin/sudo -n -H -u "$build_user" /usr/bin/env -i \
+    HOME="$(/usr/bin/dscl . -read "/Users/$build_user" NFSHomeDirectory | /usr/bin/sed 's/^NFSHomeDirectory: //')" \
+    PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+    "$runtime_dir/build-tailscale.sh" "$@" </dev/null
+}
+
+select_current() {
+  local selection
+  selection=$(/usr/bin/mktemp -d "$binary_root/.select.XXXXXX") || return 1
+  /bin/ln -s "$1" "$selection/current" || return 1
+  /bin/mv -fh "$selection/current" "$binary_root/current" || return 1
+  /bin/rmdir "$selection"
+}
+
+build_candidate() {
+  local staging version=$1
+  build_staging=$(/usr/bin/mktemp -d /private/tmp/tailscale-build.XXXXXX) || return 1
+  /usr/sbin/chown "$build_user" "$build_staging" || return 1
+  build_as_user --version "$version" --output "$build_staging/bin" || return 1
+  staging=$(/usr/bin/mktemp -d "$binary_root/releases/.new.XXXXXX") || return 1
+  install_recovery_file "$build_staging/bin/tailscale" "$staging/tailscale" 0755 || return 1
+  install_recovery_file "$build_staging/bin/tailscaled" "$staging/tailscaled" 0755 || return 1
+  /bin/chmod 0755 "$staging" || return 1
+  candidate_cli="$staging/tailscale"
+  candidate_daemon="$staging/tailscaled"
+  candidate_version=$(binary_version "$candidate_daemon") || return 1
+  [[ "${candidate_version%%-*}" == "$version" && $(binary_version "$candidate_cli") == "$candidate_version" ]] || return 1
+  /usr/bin/lipo "$candidate_cli" -verify_arch "$native_arch" && /usr/bin/lipo "$candidate_daemon" -verify_arch "$native_arch" || return 1
+  local destination="$binary_root/releases/$candidate_version"
+  # Never overwrite an existing release that might still be running.
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    secure_path "$destination" && secure_path "$destination/tailscale" && secure_path "$destination/tailscaled" || return 1
+    [[ $(binary_version "$destination/tailscale") == "$candidate_version" && $(binary_version "$destination/tailscaled") == "$candidate_version" ]] || return 1
+    /usr/bin/lipo "$destination/tailscale" -verify_arch "$native_arch" && /usr/bin/lipo "$destination/tailscaled" -verify_arch "$native_arch" || return 1
+    /bin/rm -rf "$staging" || return 1
+  else
+    /bin/mv "$staging" "$destination" || return 1
+  fi
+  candidate_cli="$destination/tailscale"
+  candidate_daemon="$destination/tailscaled"
+  /bin/rm -rf "$build_staging"
+  build_staging=''
 }
 
 acquire_lock() {
@@ -187,12 +217,13 @@ install_recovery_service() {
 
 recover_previous() {
   printf '%s\n' 'Automatic updates are suspended. Review the updater log and recovery directory before repairing/reinstalling.' > "$marker" || return 1
-  log 'Restoring the saved daemon; Tailscale state and Homebrew package links are preserved.'
+  log 'Restoring the saved daemon; Tailscale state is preserved.'
   secure_path "$recovery" && secure_path "$recovery/version" && secure_path "$recovery/node-id" || return 1
   original_version=$(/bin/cat "$recovery/version") || return 1
   original_node=$(/bin/cat "$recovery/node-id") || return 1
   secure_path "$recovery/tailscaled" && secure_path "$recovery/service-original.plist" || return 1
   [[ $(binary_version "$recovery/tailscaled") == "$original_version" ]] || return 1
+  select_current "$recovery" || return 1
   install_recovery_service || return 1
   wait_healthy "$original_version" "$recovery/tailscaled" || return 1
   /bin/rm -f "$pending" || return 1
@@ -209,6 +240,7 @@ finish() {
     fi
     result=1
   fi
+  [[ -z "${build_staging:-}" ]] || /bin/rm -rf "$build_staging"
   if [[ ${lock_held:-0} == 1 ]]; then
     /bin/rm -f "$lock_dir/pid"
     /bin/rmdir "$lock_dir"
@@ -217,66 +249,43 @@ finish() {
 }
 
 perform_update() {
-  local snapshot outdated outdated_result=0 current_image candidate
+  local snapshot current_image target current_short
   [[ ! -e "$marker" ]] || die "Automatic updates are suspended: $marker."
   if [[ -e "$pending" ]]; then
     transaction_active=1
     die 'An interrupted update was found; restoring the saved daemon.'
   fi
   preflight
-  candidate_pair || die 'Installed CLI and daemon must be matching Homebrew binaries.'
+  candidate_pair || die 'Installed CLI and daemon must be matching managed binaries.'
   snapshot=$(status_json) || die 'Cannot read the running daemon status.'
   original_node=$(printf '%s' "$snapshot" | json_value Self.ID) || die 'Cannot read device identity.'
   original_version=$(printf '%s' "$snapshot" | json_value Version) || die 'Cannot read daemon version.'
-  [[ -n "$original_node" && -n "$original_version" ]] || die 'Missing running daemon identity/version.'
-  current_image=$(running_image) || die 'Cannot determine the running daemon executable with lsof; no changes made.'
+  [[ -n "$original_node" && -n "$original_version" ]] || die 'Missing running identity/version.'
+  current_image=$(running_image) || die 'Cannot determine the running executable; no changes made.'
   healthy "$original_version" "$current_image" || die 'Existing daemon is not online and healthy; no changes made.'
   original_daemon="$current_image"
   original_cli="${original_daemon%/*}/tailscale"
-  # An external Homebrew upgrade can leave the old daemon process running.
-  # Its exact keg is preferred; a matching retained keg also permits recovery.
-  if [[ ! -x "$original_daemon" || ! -x "$original_cli" ]] || \
-     [[ $(binary_version "$original_daemon" 2>/dev/null) != "$original_version" || $(binary_version "$original_cli" 2>/dev/null) != "$original_version" ]]; then
-    original_daemon=''
-    for candidate in "$brew_prefix"/Cellar/tailscale/*/bin/tailscaled; do
-      [[ -x "$candidate" && -x "${candidate%/*}/tailscale" ]] || continue
-      if [[ $(binary_version "$candidate") == "$original_version" && $(binary_version "${candidate%/*}/tailscale") == "$original_version" ]]; then
-        original_daemon="$candidate"; original_cli="${candidate%/*}/tailscale"; break
-      fi
-    done
-    [[ -n "$original_daemon" ]] || die "No retained Homebrew binaries match running version $original_version. Restore that keg or restart/recover manually before enabling updates."
-  fi
-  log "Checking Homebrew; daemon $original_version is online."
-  brew_as_owner update --quiet || die 'Homebrew metadata update failed; daemon left untouched.'
-  # Homebrew deliberately exits 1 when a specifically named formula is outdated.
-  outdated=$(brew_as_owner outdated --formula tailscale) || outdated_result=$?
-  case "$outdated_result:$outdated" in
-    0:|0:tailscale|1:tailscale) ;;
-    *) die 'Could not check Homebrew version; daemon left untouched.' ;;
-  esac
-  if [[ -z "$outdated" && "$candidate_version" == "$original_version" && "$candidate_daemon" == "$current_image" ]]; then
-    log 'Tailscale is current in Homebrew and the installed daemon is running; no restart needed.'
+  [[ $(binary_version "$original_daemon") == "$original_version" && $(binary_version "$original_cli") == "$original_version" ]] || die 'Retained binaries do not match the running daemon.'
+  log "Checking stable Tailscale releases; daemon $original_version is online."
+  target=$(build_as_user --latest) || die 'Stable release lookup failed; daemon left untouched.'
+  [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'Invalid stable release metadata.'
+  current_short=${original_version%%-*}
+  if [[ "$target" == "$current_short" && "$candidate_daemon" == "$current_image" ]]; then
+    log 'Tailscale is current; no build or restart needed.'
     return 0
   fi
-  prepare_recovery || die 'Could not prepare independent recovery copies; daemon left untouched.'
-  printf '%s\n' "$original_version" > "$pending" || die 'Could not record update transaction.'
+  [[ $(printf '%s\n%s\n' "$target" "$current_short" | /usr/bin/sort -t. -k1,1n -k2,2n -k3,3n | /usr/bin/head -n 1) == "$current_short" ]] || die 'Refusing an automatic downgrade.'
+  build_candidate "$target" || die 'Go build or validation failed; daemon left untouched.'
+  prepare_recovery || die 'Cannot prepare independent recovery copies; daemon left untouched.'
+  printf '%s\n' "$original_version" > "$pending" || die 'Cannot record transaction.'
   transaction_active=1
-  if [[ -n "$outdated" ]]; then
-    brew_as_owner upgrade --formula tailscale || die 'Package upgrade failed; restoring the saved daemon.'
-  fi
-  candidate_pair || die 'Updated binaries are missing or mismatched; restoring the saved daemon.'
-  if [[ -n "$outdated" && "$candidate_version" == "$original_version" && "$candidate_daemon" == "$current_image" ]]; then
-    # A pinned package can produce a successful Homebrew no-op.
-    /bin/rm "$pending" || die 'Could not finalize the unchanged package check.'
-    transaction_active=0
-    die 'Homebrew reports Tailscale outdated but made no change; check whether the formula is pinned.'
-  fi
-  log "Starting installed daemon $candidate_version from $candidate_daemon."
-  restart_service || die 'Daemon restart failed; restoring the saved daemon.'
-  wait_healthy "$candidate_version" "$candidate_daemon" || die 'New daemon failed connectivity, identity, executable, or version checks; restoring the saved daemon.'
-  /bin/rm "$pending" || die 'Could not finalize the successful update.'
+  select_current "${candidate_daemon%/*}" || die 'Cannot switch release; restoring saved daemon.'
+  log "Starting built daemon $candidate_version from $candidate_daemon."
+  restart_service || die 'Daemon restart failed; restoring saved daemon.'
+  wait_healthy "$candidate_version" "$candidate_daemon" || die 'New daemon failed health checks; restoring saved daemon.'
+  /bin/rm "$pending" || die 'Cannot finalize successful update.'
   transaction_active=0
-  log "SUCCESS: $candidate_version is online with the original Tailscale device identity."
+  log "SUCCESS: $candidate_version is online with the original device identity."
 }
 
 main() {
@@ -285,6 +294,10 @@ main() {
   transaction_active=0
   lock_held=0
   [[ $# == 0 || ( $# == 1 && "$1" == --check ) ]] || die 'Usage: update-tailscale.sh [--check]'
+  [[ $(/usr/bin/uname -s) == Darwin ]] || die 'macOS is required.'
+  native_arch=$(/usr/bin/uname -m)
+  if [[ $(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true) == 1 ]]; then native_arch=arm64; fi
+  case "$native_arch" in x86_64|arm64) ;; *) die "Unsupported Mac architecture: $native_arch" ;; esac
   load_config
   if [[ $# == 1 ]]; then
     [[ ! -e "$marker" && ! -e "$pending" ]] || die 'Recovery is required; inspect the updater log and recovery directory.'

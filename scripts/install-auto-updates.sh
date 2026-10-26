@@ -2,7 +2,7 @@
 # Internal stage of install.sh: schedule updates for the authenticated daemon.
 set -eu
 set -o pipefail
-export PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 umask 022
 
 readonly source_dir=${0:A:h}
@@ -11,7 +11,7 @@ readonly runtime_dir=/Library/PrivilegedHelperTools/com.tailscale.headless-updat
 readonly updater_plist=/Library/LaunchDaemons/com.tailscale.headless-updater.plist
 readonly lifecycle_lock=/var/run/com.tailscale.headless-updater.lock
 lock_held=false
-brew_bin=''
+binary_root=/Library/PrivilegedHelperTools/com.tailscale.headless
 service_label=com.tailscale.tailscaled
 socket=/var/run/tailscaled.socket
 update_hour=4
@@ -20,18 +20,17 @@ check_only=false
 
 usage() {
   print 'Internal setup helper. Use ./install.sh for normal installation.'
-  print 'Options: [--check] [--brew PATH] [--label LABEL] [--socket PATH] [--hour 0-23] [--minute 0-59]'
-  print 'Run as the Homebrew owner. Installation requests sudo once; --check never requests it.'
+  print 'Options: [--check] [--label LABEL] [--socket PATH] [--hour 0-23] [--minute 0-59]'
+  print 'Run as the build user. Installation requests sudo once; --check never requests it.'
 }
 fail() { print -u2 -r -- "ERROR: $*"; exit 1; }
 while (( $# )); do
   case "$1" in
     --check) check_only=true; shift ;;
     --help|-h) usage; exit 0 ;;
-    --brew|--label|--socket|--hour|--minute)
+    --label|--socket|--hour|--minute)
       (( $# >= 2 )) || fail "Missing value for $1"
       case "$1" in
-        --brew) brew_bin=$2 ;;
         --label) service_label=$2 ;;
         --socket) socket=$2 ;;
         --hour) update_hour=$2 ;;
@@ -41,28 +40,25 @@ while (( $# )); do
     *) usage >&2; fail "Unknown argument: $1" ;;
   esac
 done
-[[ $EUID != 0 ]] || fail 'Run this script as your normal Homebrew user, without sudo.'
+[[ $EUID != 0 ]] || fail 'Run this script as your normal user, without sudo.'
 [[ $(/usr/bin/uname -s) == Darwin ]] || fail 'This installer requires macOS.'
 [[ "$service_label" == [A-Za-z0-9]* && "$service_label" != *[^A-Za-z0-9._-]* ]] || fail 'Invalid service label.'
 [[ "$update_hour" == <0-23> && "$update_minute" == <0-59> ]] || fail 'Invalid update time.'
 [[ "$socket" == /* && "$socket" != *$'\n'* ]] || fail 'The socket must be an absolute path.'
-if [[ -z "$brew_bin" ]]; then brew_bin=$(command -v brew) || fail 'Homebrew not found.'; fi
-[[ "$brew_bin" == /* && -x "$brew_bin" ]] || fail 'Use an absolute path to the Homebrew executable.'
-brew_prefix=$("$brew_bin" --prefix)
-[[ "$brew_prefix" == /usr/local || "$brew_prefix" == /opt/homebrew ]] || fail 'Only standard Intel and Apple Silicon Homebrew prefixes are supported.'
-brew_bin="$brew_prefix/bin/brew"
-[[ -x "$brew_bin" ]] || fail 'The standard Homebrew executable is missing.'
-[[ -x "$brew_prefix/bin/tailscale" && -x "$brew_prefix/bin/tailscaled" ]] || fail 'Install headless Tailscale first.'
-brew_user=$(/usr/bin/stat -f %Su "$brew_prefix/Cellar/tailscale")
-[[ "$brew_user" == "$(/usr/bin/id -un)" ]] || fail "Run as the Homebrew owner: $brew_user"
-[[ $(/usr/bin/id -u "$brew_user") != 0 ]] || fail 'Homebrew must not be owned by root.'
+build_user=$(/usr/bin/id -un)
+[[ $(/usr/bin/id -u "$build_user") != 0 ]] || fail 'Build user must not be root.'
+[[ -x "$binary_root/current/tailscale" && -x "$binary_root/current/tailscaled" ]] || fail 'Install headless Tailscale first.'
+case "$(/usr/bin/uname -m)" in
+  x86_64|arm64) ;;
+  *) fail 'Intel or Apple Silicon macOS is required.' ;;
+esac
 readonly service_plist=/Library/LaunchDaemons/${service_label}.plist
 [[ -f "$service_plist" ]] || fail "Missing daemon plist: $service_plist"
 [[ ! -L "$runtime_dir" && ! -L "$updater_plist" ]] || fail 'Unexpected symlink at installation destination.'
 [[ ! -e "$runtime_dir/RECOVERY_REQUIRED" ]] || fail 'A previous update rolled back. Resolve recovery before reinstalling.'
 [[ ! -e "$runtime_dir/TRANSACTION_PENDING" ]] || fail 'An interrupted update requires recovery before reinstalling.'
 daemon_path=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$service_plist")
-[[ "$daemon_path" == "$brew_prefix/bin/tailscaled" || "$daemon_path" == "$brew_prefix/opt/tailscale/bin/tailscaled" ]] || fail 'Existing daemon does not use the expected Homebrew binary.'
+[[ "$daemon_path" == "$binary_root/current/tailscaled" ]] || fail 'Existing daemon does not use the managed Go-built binary.'
 [[ $(/usr/libexec/PlistBuddy -c 'Print :RunAtLoad' "$service_plist") == true ]] || fail 'Enable RunAtLoad on the existing daemon first.'
 [[ $(/usr/libexec/PlistBuddy -c 'Print :KeepAlive' "$service_plist") == true ]] || fail 'Enable KeepAlive on the existing daemon first.'
 /bin/launchctl print "system/$service_label" >/dev/null || fail 'The existing daemon is not loaded.'
@@ -88,7 +84,7 @@ config="$staging_dir/config.plist"
 plist="$staging_dir/updater.plist"
 /usr/bin/plutil -create xml1 "$config"
 for key value in \
-  BrewBin "$brew_bin" BrewUser "$brew_user" BrewPrefix "$brew_prefix" \
+  BuildUser "$build_user" \
   ServiceLabel "$service_label" ServicePlist "$service_plist" Socket "$socket"; do
   /usr/bin/plutil -insert "$key" -string "$value" "$config"
 done
@@ -106,7 +102,7 @@ done
 /usr/bin/plutil -insert StandardErrorPath -string /var/log/tailscale-headless-update.log "$plist"
 /usr/bin/plutil -lint "$config" "$plist"
 print -r -- "Daemon: $service_label ($daemon_path)"
-print -r -- "Homebrew: $brew_bin, running as $brew_user"
+print -r -- "Go builds run as: $build_user"
 printf 'Schedule: each boot and daily at %02d:%02d local time.\n' "$update_hour" "$update_minute"
 print 'Updates may briefly interrupt Tailscale connections when the daemon restarts.'
 if [[ "$check_only" == true ]]; then
@@ -127,10 +123,11 @@ if /bin/launchctl print "system/$updater_label" >/dev/null 2>&1; then
   /usr/bin/sudo -n /bin/launchctl bootout "system/$updater_label"
 fi
 /usr/bin/sudo -n /usr/bin/install -d -o root -g wheel -m 0755 "$runtime_dir"
-for installed_file in update-tailscale.sh config.plist; do
+for installed_file in update-tailscale.sh build-tailscale.sh config.plist; do
   [[ ! -L "$runtime_dir/$installed_file" ]] || fail "Unexpected symlink: $runtime_dir/$installed_file"
 done
 /usr/bin/sudo -n /usr/bin/install -o root -g wheel -m 0755 "$source_dir/update-tailscale.sh" "$runtime_dir/update-tailscale.sh"
+/usr/bin/sudo -n /usr/bin/install -o root -g wheel -m 0755 "$source_dir/build-tailscale.sh" "$runtime_dir/build-tailscale.sh"
 /usr/bin/sudo -n /usr/bin/install -o root -g wheel -m 0644 "$config" "$runtime_dir/config.plist"
 /usr/bin/sudo -n /usr/bin/install -o root -g wheel -m 0644 "$plist" "$updater_plist"
 /usr/bin/sudo -n /bin/launchctl enable "system/$service_label"

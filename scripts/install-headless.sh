@@ -23,7 +23,10 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
 PLIST_TMP=""
 TEMPLATE=""
-BREW_PREFIX=""
+BINARY_ROOT=/Library/PrivilegedHelperTools/com.tailscale.headless
+BUILD_TMP=""
+LIFECYCLE_LOCK=/var/run/com.tailscale.headless-updater.lock
+LOCK_HELD=false
 TS=""
 TSD=""
 
@@ -32,6 +35,12 @@ cleanup() {
 
   if [[ -n "${PLIST_TMP:-}" && -f "${PLIST_TMP}" ]]; then
     rm -f "${PLIST_TMP}" 2>/dev/null || true
+  fi
+
+  [[ -z "${BUILD_TMP:-}" ]] || rm -rf "$BUILD_TMP"
+  if [[ "$LOCK_HELD" == true ]]; then
+    sudo -n rm -f "$LIFECYCLE_LOCK/pid"
+    sudo -n rmdir "$LIFECYCLE_LOCK"
   fi
 
   if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
@@ -52,6 +61,11 @@ source "${ENV_FILE}"
 
 LAUNCHD_LABEL="${LAUNCHD_LABEL:-com.tailscale.tailscaled}"
 LAUNCHD_PLIST="${LAUNCHD_PLIST:-/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist}"
+[[ "$LAUNCHD_LABEL" == [A-Za-z0-9]* && "$LAUNCHD_LABEL" != *[^A-Za-z0-9._-]* &&
+   "$LAUNCHD_PLIST" == "/Library/LaunchDaemons/$LAUNCHD_LABEL.plist" ]] || {
+  echo 'A system LaunchDaemon path matching LAUNCHD_LABEL is required.' >&2
+  exit 1
+}
 STATE_DIR="${STATE_DIR:-/var/lib/tailscale}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/tailscaled.state}"
 LOG_OUT="${LOG_OUT:-/var/log/tailscaled.log}"
@@ -77,14 +91,14 @@ if [[ "${TAILNET_DOMAIN}" != *.ts.net ]]; then
   exit 1
 fi
 
-BREW_BIN="${BREW_BIN:-brew}"
 TAILSCALED_SOCKET="${TAILSCALED_SOCKET:-/var/run/tailscaled.socket}"
 TAILSCALED_WAIT_SECONDS="${TAILSCALED_WAIT_SECONDS:-20}"
-
-if ! command -v "${BREW_BIN}" >/dev/null 2>&1; then
-  echo "ERROR: brew not found via BREW_BIN=${BREW_BIN}"
-  exit 1
-fi
+[[ $(/usr/bin/uname -s) == Darwin ]] || { echo 'macOS is required' >&2; exit 1; }
+case "$(/usr/bin/uname -m)" in
+  x86_64|arm64) ;;
+  *) echo 'Intel or Apple Silicon macOS is required' >&2; exit 1 ;;
+esac
+[[ $EUID != 0 ]] || { echo 'Run as a normal user' >&2; exit 1; }
 
 bool_to_flag() {
   local value="$1"
@@ -115,9 +129,8 @@ get_macos_hostname() {
   print -r -- "${detected}"
 }
 
-BREW_PREFIX="$("${BREW_BIN}" --prefix)"
-TS="${BREW_PREFIX}/bin/tailscale"
-TSD="${BREW_PREFIX}/bin/tailscaled"
+TS="${BINARY_ROOT}/current/tailscale"
+TSD="${BINARY_ROOT}/current/tailscaled"
 TEMPLATE="${ROOT_DIR}/templates/com.tailscale.tailscaled.plist.template"
 PLIST_TMP="$(mktemp)"
 
@@ -156,8 +169,7 @@ echo "============================================================"
 echo "TAILSCALE HEADLESS MACOS INSTALL"
 echo "============================================================"
 echo "ROOT_DIR              : ${ROOT_DIR}"
-echo "BREW_BIN              : ${BREW_BIN}"
-echo "BREW_PREFIX           : ${BREW_PREFIX}"
+echo "BINARY_ROOT           : ${BINARY_ROOT}"
 echo "TS                    : ${TS}"
 echo "TSD                   : ${TSD}"
 echo "HOSTNAME              : ${TS_HOSTNAME}"
@@ -174,10 +186,18 @@ echo "TAILSCALED_WAIT_SECS  : ${TAILSCALED_WAIT_SECONDS}"
 echo "============================================================"
 
 echo
-echo "---- install / relink tailscale ----"
-HOMEBREW_NO_AUTO_UPDATE=1 "${BREW_BIN}" install tailscale
-"${BREW_BIN}" unlink tailscale 2>/dev/null || true
-"${BREW_BIN}" link --overwrite --force tailscale
+echo "---- build stable Tailscale using Go ----"
+BUILD_TMP="$(mktemp -d)"
+"${ROOT_DIR}/scripts/build-tailscale.sh" --output "$BUILD_TMP/bin"
+VERSION="$(cat "$BUILD_TMP/bin/version")"
+sudo mkdir "$LIFECYCLE_LOCK" || { echo 'Another lifecycle operation is active; inspect the lock before retrying.' >&2; exit 1; }
+LOCK_HELD=true
+print -r -- "$$" | sudo tee "$LIFECYCLE_LOCK/pid" >/dev/null
+[[ "$VERSION" == [0-9]* && "$VERSION" != *[^A-Za-z0-9.+-]* ]] || exit 1
+[[ ! -L "$BINARY_ROOT" && ! -L "$BINARY_ROOT/releases" && ! -e "$BINARY_ROOT/current" && ! -L "$BINARY_ROOT/current" && ! -e "$BINARY_ROOT/releases/$VERSION" && ! -L "$BINARY_ROOT/releases/$VERSION" ]] || { echo 'Binary installation already exists; inspect it before retrying.' >&2; exit 1; }
+sudo install -d -o root -g wheel -m 0755 "$BINARY_ROOT" "$BINARY_ROOT/releases" "$BINARY_ROOT/releases/$VERSION"
+sudo install -o root -g wheel -m 0755 "$BUILD_TMP/bin/tailscale" "$BUILD_TMP/bin/tailscaled" "$BINARY_ROOT/releases/$VERSION/"
+sudo ln -s "$BINARY_ROOT/releases/$VERSION" "$BINARY_ROOT/current"
 
 [[ -x "${TS}" ]] || { echo "ERROR: missing ${TS}"; exit 1; }
 [[ -x "${TSD}" ]] || { echo "ERROR: missing ${TSD}"; exit 1; }
@@ -196,46 +216,21 @@ echo "---- render LaunchDaemon plist ----"
 sed \
   -e "s|__LAUNCHD_LABEL__|${LAUNCHD_LABEL}|g" \
   -e "s|__TAILSCALED_PATH__|${TSD}|g" \
+  -e "s|__SOCKET__|${TAILSCALED_SOCKET}|g" \
   -e "s|__STATE_FILE__|${STATE_FILE}|g" \
   -e "s|__LOG_OUT__|${LOG_OUT}|g" \
   -e "s|__LOG_ERR__|${LOG_ERR}|g" \
   "${TEMPLATE}" > "${PLIST_TMP}"
 
-sudo cp "${PLIST_TMP}" "${LAUNCHD_PLIST}"
-sudo chown root:wheel "${LAUNCHD_PLIST}"
-sudo chmod 644 "${LAUNCHD_PLIST}"
-sudo plutil -lint "${LAUNCHD_PLIST}"
-
-echo
-echo "---- clean old daemon state ----"
-sudo launchctl bootout system "${LAUNCHD_PLIST}" 2>/dev/null || true
-sudo launchctl bootout "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-sudo launchctl remove "${LAUNCHD_LABEL}" 2>/dev/null || true
-sudo pkill -x tailscaled 2>/dev/null || true
-sudo rm -f "${TAILSCALED_SOCKET}"
-sleep 1
+plutil -lint "${PLIST_TMP}"
+[[ ! -e "$LAUNCHD_PLIST" && ! -L "$LAUNCHD_PLIST" ]] || { echo 'Daemon plist already exists' >&2; exit 1; }
+sudo install -o root -g wheel -m 0644 "${PLIST_TMP}" "${LAUNCHD_PLIST}"
 
 echo
 echo "---- bootstrap daemon ----"
-BOOTSTRAP_OK=false
-
-sudo launchctl enable "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-
-if sudo launchctl bootstrap system "${LAUNCHD_PLIST}"; then
-  sudo launchctl kickstart -k "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-  BOOTSTRAP_OK=true
-else
-  echo "WARNING: launchctl bootstrap failed."
-  echo "Attempting recovery via kickstart..."
-  sudo launchctl kickstart -k "system/${LAUNCHD_LABEL}" 2>/dev/null || true
-
-  if sudo launchctl print "system/${LAUNCHD_LABEL}" >/dev/null 2>&1; then
-    BOOTSTRAP_OK=true
-  else
-    echo "Falling back to manual daemon start for this session."
-    sudo /bin/sh -c "exec '${TSD}' --state='${STATE_FILE}' --socket='${TAILSCALED_SOCKET}' >>'${LOG_OUT}' 2>>'${LOG_ERR}'" &
-  fi
-fi
+sudo launchctl enable "system/${LAUNCHD_LABEL}"
+sudo launchctl bootstrap system "${LAUNCHD_PLIST}" || { echo 'Daemon bootstrap failed; inspect the plist and logs before retrying.' >&2; exit 1; }
+BOOTSTRAP_OK=true
 
 echo
 echo "---- wait for tailscaled ----"
@@ -310,7 +305,7 @@ case "${RUN_TAILSCALE_UP:l}" in
       exit 1
     fi
     # shellcheck disable=SC2086
-    sudo "${TS}" up --reset --hostname="${TS_HOSTNAME}" "${ACCEPT_ROUTES_FLAG}" "${ACCEPT_DNS_FLAG}" ${=TAILSCALE_EXTRA_FLAGS}
+    sudo "${TS}" --socket="${TAILSCALED_SOCKET}" up --hostname="${TS_HOSTNAME}" "${ACCEPT_ROUTES_FLAG}" "${ACCEPT_DNS_FLAG}" ${=TAILSCALE_EXTRA_FLAGS}
     ;;
   false|no|0)
     echo
@@ -324,8 +319,8 @@ esac
 
 echo
 echo "---- summary ----"
-"${TS}" status || true
-"${TS}" ip -4 || true
+"${TS}" --socket="${TAILSCALED_SOCKET}" status || true
+"${TS}" --socket="${TAILSCALED_SOCKET}" ip -4 || true
 pgrep -fl tailscaled || true
 sudo launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | sed -n '1,35p' || true
 
